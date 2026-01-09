@@ -18,15 +18,23 @@
 
 namespace easykv {
 namespace lsm {
+
+/**
+ * EntryIndex - DataBlock 中的条目索引
+ * 记录每个键值对的偏移量、键和值
+ *
+ * 注意: std::string_view 指向的内存必须在 SST 文件生命周期内有效
+ * 这些视图在 Load() 时指向 mmap 后的文件内存
+ */
 struct EntryIndex {
-    // std::string key;
-    // std::string value;
-    std::string_view key;
-    std::string_view value;
-    size_t offset;
+    std::string_view key;       // 键的视图（指向 mmap 内存）
+    std::string_view value;     // 值的视图（指向 mmap 内存）
+    size_t offset;              // 在 DataBlock 中的偏移量
+
     size_t binary_size() {
         return key.size() + value.size() + 2 * sizeof(size_t);
     }
+
     size_t Load(char* s, size_t index) {
         offset = index;
         key = std::string_view(s + 2 * sizeof(size_t), *reinterpret_cast<size_t*>(s));
@@ -35,12 +43,26 @@ struct EntryIndex {
     }
 };
 /*
-IndexBlock in file [size(8byte) | cnt(8byte) | (offset(8byte) + key_size(8byte) + key(key_size byte)), ...]
-DataBlock in file [(size(8byte) | bloom_filter | cnt(8byte) | (key_size(8byte) + value_size(8byte) + key(key_size byte) + value(value_size byte)), ...]
-SST in file [IndexBlock | (DataBlock...)]
-
-DataBlcok 和 IndexBlock 都以文件形式访问，Memtable 边序列化边构建 DataBlock
-*/
+ * SST 文件格式说明:
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │                        SST 文件结构                              │
+ * ├─────────────────────────────────────────────────────────────────┤
+ * │  [IndexBlock] | [DataBlock 0] | [DataBlock 1] | ...              │
+ * └─────────────────────────────────────────────────────────────────┘
+ *
+ * IndexBlock: [size(8B) | count(8B) | (offset(8B) + key_size(8B) + key), ...]
+ *   - 存储每个 DataBlock 的起始偏移量和起始 key
+ *   - 用于快速定位目标 key 所在的 DataBlock
+ *
+ * DataBlock: [size(8B) | bloom_filter | count(8B) | (key_size + value_size + key + value), ...]
+ *   - 存储实际的键值对数据
+ *   - 包含布隆过滤器用于快速判断 key 是否存在
+ *
+ * 访问流程:
+ *   1. 在 IndexBlock 中二分查找目标 key 所在的 DataBlock
+ *   2. 加载对应 DataBlock，使用布隆过滤器快速过滤
+ *   3. 在 DataBlock 中二分查找目标 key
+ */
 
 class DataBlockIndex {
 public:
@@ -71,12 +93,13 @@ public:
         return index;
     }
     size_t binary_size() {
-        if (cached_binary_size_ == -1) {
+        if (!binary_size_cached_) {
             size_t size = 2 * sizeof(size_t);
             for (auto& entry : data_index_) {
                 size += entry.binary_size();
             }
             cached_binary_size_ = size;
+            binary_size_cached_ = true;
         }
         return cached_binary_size_;
     }
@@ -108,11 +131,12 @@ public:
         return data_index_;
     }
 private:
-    size_t offset_;
+    size_t offset_{0};
     std::vector<EntryIndex> data_index_;
     easykv::common::BloomFilter bloom_filter_;
-    size_t cached_binary_size_ = -1;
-    size_t size_;
+    size_t cached_binary_size_{0};
+    bool binary_size_cached_{false};
+    size_t size_{0};
 };
 
 class DataBlockIndexIndex {
@@ -205,7 +229,13 @@ private:
     std::vector<DataBlockIndexIndex> data_block_indexs_;
 };
 
-// no empty sst
+/**
+ * SST - Sorted String Table
+ * 磁盘上的持久化有序键值对存储
+ *
+ * 使用 mmap 映射文件，避免内核态和用户态之间的数据拷贝
+ * 内存管理由操作系统负责页面缓存
+ */
 class SST {
 public:
     class Iterator {
@@ -446,12 +476,21 @@ public:
     }
     bool Load() {
         fd_ = open(name_.c_str(), O_RDWR);
+        if (fd_ == -1) {
+            return false;
+        }
         struct stat stat_buf;
-        stat(name_.c_str(), &stat_buf);
+        if (fstat(fd_, &stat_buf) == -1) {
+            close(fd_);
+            fd_ = -1;
+            return false;
+        }
         file_size_ = stat_buf.st_size;
-        // std::cout << "file size " << file_size_ << std::endl;
         data_ = (char*)mmap(NULL, file_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
-        if (!data_) {
+        if (data_ == MAP_FAILED) {
+            close(fd_);
+            fd_ = -1;
+            data_ = nullptr;
             return false;
         }
         index_block.Load(data_);

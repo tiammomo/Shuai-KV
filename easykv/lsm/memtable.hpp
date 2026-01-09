@@ -4,7 +4,7 @@
 namespace easykv {
 namespace lsm {
 
-class MemeTable {
+class MemTable {
 public:
     using Iterator = ConcurrentSkipList::Iterator;
 
@@ -19,7 +19,7 @@ public:
     void Delete(std::string_view key) {
         skip_list_.Delete(key);
     }
-    
+
     size_t binary_size() {
         return skip_list_.binary_size();
     }
@@ -37,8 +37,10 @@ public:
     }
 private:
     ConcurrentSkipList skip_list_;
-    bool lock_ = false;
 };
+
+// 兼容旧名称
+using MemeTable = MemTable;
 
 }
 }

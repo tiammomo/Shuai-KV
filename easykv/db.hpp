@@ -19,7 +19,7 @@ namespace easykv {
 class DB {
 public:
     DB() {
-        memtable_ = std::make_shared<lsm::MemeTable>();
+        memtable_ = std::make_shared<lsm::MemTable>();
         to_sst_thread_ = std::thread(&DB::ToSSTLoop, this);
         manifest_queue_.emplace_back(std::make_shared<lsm::Manifest>());
         sst_id_ = manifest_queue_.back()->max_sst_id();
@@ -67,47 +67,40 @@ public:
 
     void Put(std::string_view key, std::string_view value) {
         memtable_->Put(key, value);
-        if (memtable_->binary_size() > memetable_max_size_) {
+        if (memtable_->binary_size() > memtable_max_size()) {
             easykv::common::RWLock::WriteLock w_lock(memtable_lock_);
             inmemtables_.emplace_back(memtable_);
             memtable_ = std::make_shared<easykv::lsm::MemeTable>();
+            // 唤醒刷盘线程
+            to_sst_cv_.notify_one();
         }
     }
 private:
     void ToSSTLoop() {
         while (true) {
             std::unique_lock<std::mutex> lock(to_sst_mutex_);
-            to_sst_cv_.wait(lock);
-            while (true) {
-                bool to_sst = false;
-                {
-                    easykv::common::RWLock::ReadLock r_lock(memtable_lock_);
-                    if (inmemtables_.size() > 0) {
-                        to_sst = true;
-                    }
-                }
-                if (to_sst) {
-                    ToSST();
-                } else {
-                    break;
-                }
-
-            }
-            if (to_sst_stop_flag_) {
+            // 等待直到有数据需要刷盘或收到停止信号
+            to_sst_cv_.wait(lock, [this] {
+                return to_sst_stop_flag_ || !inmemtables_.empty();
+            });
+            if (to_sst_stop_flag_ && inmemtables_.empty()) {
                 break;
+            }
+            // 处理所有待刷盘的 memtable
+            while (!inmemtables_.empty()) {
+                auto memtable = inmemtables_.front();
+                inmemtables_.erase(inmemtables_.begin());
+                lock.unlock();  // 释放锁以避免阻塞 Put 操作
+                ToSST(memtable);
+                lock.lock();    // 重新获取锁
             }
         }
     }
-    void ToSST() {
-        // inmemtables_ must > 0
-        std::shared_ptr<lsm::MemeTable> inmemtable;
-        {
-            easykv::common::RWLock::ReadLock r_lock(memtable_lock_);
-            inmemtable = *inmemtables_.begin();
-        }
-        
+
+    // 将 memtable 刷盘为 SST 文件
+    void ToSST(std::shared_ptr<lsm::MemeTable> inmemtable) {
         auto sst = std::make_shared<lsm::SST>(*inmemtable, ++sst_id_);
-        
+
         {
             easykv::common::RWLock::WriteLock w_lock(manifest_lock_);
             auto new_manifest = manifest_queue_.back()->InsertAndUpdate(sst);
@@ -116,23 +109,13 @@ private:
             }
             manifest_queue_.emplace_back(new_manifest);
         }
-
-        {
-            easykv::common::RWLock::WriteLock w_lock(memtable_lock_);
-            std::vector<std::shared_ptr<easykv::lsm::MemeTable> > new_inmemtables;
-            new_inmemtables.reserve(inmemtables_.size() - 1);
-            for (auto it = inmemtables_.begin() + 1; it != inmemtables_.end(); ++it) {
-                new_inmemtables.emplace_back(*it);
-            }
-            inmemtables_ = std::move(new_inmemtables);
-        }
     }
 
 private:
-private:
-    constexpr static size_t memetable_max_size_ = 4096 * 1024 - 1024 * 1024; // <= 4kb(page size)
-    std::shared_ptr<easykv::lsm::MemeTable> memtable_;
-    std::vector<std::shared_ptr<easykv::lsm::MemeTable> > inmemtables_;
+    // MemTable 最大大小: 3MB (小于页面大小以优化IO)
+    static constexpr size_t memtable_max_size() { return 4096 * 1024 - 1024 * 1024; }
+    std::shared_ptr<lsm::MemTable> memtable_;
+    std::vector<std::shared_ptr<lsm::MemTable> > inmemtables_;
     std::vector<std::shared_ptr<easykv::lsm::Manifest> > manifest_queue_;
     easykv::common::RWLock manifest_lock_;
     easykv::common::RWLock memtable_lock_;

@@ -202,7 +202,15 @@ public:
         last_time_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count());
-        if (req.term() < term_ || (req.term() == term_ && req.index() < raft_log_.index())) {
+
+        // 获取当前日志索引的原子快照
+        size_t current_log_index = raft_log_.index();
+
+        if (req.term() < term_) {
+            return false;
+        }
+        // 只有在请求任期相同时才比较日志索引
+        if (req.term() == term_ && req.index() < current_log_index) {
             return false;
         }
         if (req.term() == term_ && voted_) {
@@ -421,7 +429,7 @@ private:
                 }
                 std::unique_lock<std::mutex> lock(election_thread_mutex_);
                 if (GetPodStatusWithLock() != PodStatus::Leader) {
-                    auto future_time = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_time_ms_);
+                    auto future_time = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_time_ms());
                     election_cv_.wait_until(lock, future_time, [this]() {
                         return election_thread_stop_flag_;
                     });
@@ -434,14 +442,14 @@ private:
                     ).count()) - last_time_ << std::endl;
                     if (static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch()
-                    ).count()) - last_time_ < timeout_time_ms_) {
+                    ).count()) - last_time_ < timeout_time_ms()) {
                         std::cout << "not time out " << std::endl;
                         continue;
                     }
                     status_ = PodStatus::Candidate;
                     RequestVote();
                 } else {
-                    auto future_time = std::chrono::system_clock::now() + std::chrono::milliseconds(heart_beat_time_ms_);
+                    auto future_time = std::chrono::system_clock::now() + std::chrono::milliseconds(heart_beat_time_ms());
                     election_cv_.wait_until(lock, future_time, [this]() {
                         return election_thread_stop_flag_;
                     });
@@ -454,13 +462,10 @@ private:
         });
     }
 
-private:
-    constexpr static const int heart_beat_time_ms_ = 1000;
-    constexpr static const int timeout_time_ms_ = 5000;
-    std::thread election_thread_; // leader's election_thread_ send heart_beat or time out try to election
-    std::mutex election_thread_mutex_; // common lock
-    std::condition_variable election_cv_;
-    
+    // Raft 超时配置（毫秒）
+    static constexpr int heart_beat_time_ms() { return 1000; }  // 心跳间隔: 1秒
+    static constexpr int timeout_time_ms() { return 5000; }      // 选举超时: 5秒
+
     std::mutex election_mutex_;
     bool election_thread_stop_flag_ = false;
     std::atomic_uint64_t last_time_{static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
