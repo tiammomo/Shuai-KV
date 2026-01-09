@@ -26,8 +26,8 @@
 #include <string_view>
 #include <vector>
 
-#include "easykv/utils/lock.hpp"
-#include "easykv/utils/global_random.h"
+#include "SHUAI-KV/utils/lock.hpp"
+#include "SHUAI-KV/utils/global_random.h"
 
 namespace easykv {
 namespace lsm {

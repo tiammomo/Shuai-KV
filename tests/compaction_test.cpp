@@ -5,11 +5,11 @@
 #include <memory>
 #include <string>
 
-#include "easykv/db.hpp"
-#include "easykv/lsm/manifest.hpp"
-#include "easykv/lsm/memtable.hpp"
-#include "easykv/lsm/sst.hpp"
-#include "easykv/pool/thread_pool.hpp"
+#include "SHUAI-KV/db.hpp"
+#include "SHUAI-KV/lsm/manifest.hpp"
+#include "SHUAI-KV/lsm/memtable.hpp"
+#include "SHUAI-KV/lsm/sst.hpp"
+#include "SHUAI-KV/pool/thread_pool.hpp"
 
 
 TEST(Compaction, Read) {

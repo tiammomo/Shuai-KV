@@ -1,4 +1,4 @@
-# Shuai-KV
+# SHUAI-KV
 
 基于 **Raft 协议**的分布式 KV 存储系统，采用 **LSM Tree** 作为存储引擎。
 
@@ -8,7 +8,10 @@
 - **强一致性**: Raft 协议保证分布式强一致性
 - **并发安全**: 读写锁 + 细粒度锁保证多线程安全
 - **模块化设计**: 清晰的分层架构，易于维护和扩展
-- **布隆过滤器**: 减少无效磁盘访问，提升查询性能
+- **多级缓存**: 布隆过滤器 + Block Cache 加速查询
+- **压缩存储**: 支持 Snappy/LZ4 压缩，减少存储空间
+- **异步 I/O**: 基于 io_uring 的高性能异步写入
+- **批量提交**: 事务性批量写入优化
 
 ## 技术栈
 
@@ -20,6 +23,8 @@
 | 存储引擎 | LSM Tree |
 | 分布式协议 | Raft |
 | 并发控制 | 读写锁 (RWLock) |
+| 压缩算法 | Snappy / LZ4 |
+| 异步 I/O | io_uring (Linux) |
 
 ## 架构设计
 
@@ -45,6 +50,14 @@
 │   │  │ (SkipList)│  │ (mmap)   │  │  - 分层管理          │  │  │
 │   │  └──────────┘  └──────────┘  │  - Compaction        │  │  │
 │   │                              └──────────────────────┘  │  │
+│   │                                                          │  │
+│   │  ┌──────────────────────────────────────────────────┐  │  │
+│   │  │              性能优化层                           │  │  │
+│   │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌────────┐ │  │  │
+│   │  │  │  Block  │ │Compression│ │Async IO │ │ Batch  │ │  │  │
+│   │  │  │  Cache  │ │(LZ4/Snappy)│ │(uring) │ │Commit  │ │  │  │
+│   │  │  └─────────┘ └─────────┘ └─────────┘ └────────┘ │  │  │
+│   │  └──────────────────────────────────────────────────┘  │  │
 │   └─────────────────────────────────────────────────────────┘  │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -54,12 +67,19 @@
 
 ```
 Shuai-KV/
-├── easykv/                    # 主代码目录
+├── SHUAI-KV/                  # 主代码目录
 │   ├── lsm/                   # LSM 树存储引擎
 │   │   ├── memtable.hpp       # 内存表（跳表实现）
 │   │   ├── skiplist.hpp       # 并发安全跳表
 │   │   ├── sst.hpp            # SST 磁盘文件
-│   │   └── manifest.hpp       # Manifest 元数据管理
+│   │   ├── manifest.hpp       # Manifest 元数据管理
+│   │   ├── block_cache.hpp    # LRU 块缓存
+│   │   ├── compression.hpp    # Snappy/LZ4 压缩
+│   │   ├── async_io.hpp       # io_uring 异步 I/O
+│   │   ├── async_sst_writer.hpp # 异步 SST 写入器
+│   │   ├── async_sst_writer.cpp
+│   │   ├── batch_commit.hpp   # 批量提交
+│   │   └── read_quorum.hpp    # 读 Quorum / 线性化读
 │   ├── raft/                  # Raft 协议实现
 │   │   ├── pod.hpp            # Raft 节点核心实现
 │   │   ├── config.hpp         # 配置管理
@@ -93,11 +113,13 @@ Shuai-KV/
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| MemTable | [memtable.hpp](easykv/lsm/memtable.hpp) | 内存中的有序键值表 |
-| SkipList | [skiplist.hpp](easykv/lsm/skiplist.hpp) | 并发安全的内存索引 |
-| SST | [sst.hpp](easykv/lsm/sst.hpp) | 磁盘排序字符串表 |
-| Manifest | [manifest.hpp](easykv/lsm/manifest.hpp) | SST 元数据与分层管理 |
-| BloomFilter | [bloom_filter.hpp](easykv/utils/bloom_filter.hpp) | 快速存在性判断 |
+| MemTable | [memtable.hpp](SHUAI-KV/lsm/memtable.hpp) | 内存中的有序键值表 |
+| SkipList | [skiplist.hpp](SHUAI-KV/lsm/skiplist.hpp) | 并发安全的内存索引 |
+| SST | [sst.hpp](SHUAI-KV/lsm/sst.hpp) | 磁盘排序字符串表 |
+| Manifest | [manifest.hpp](SHUAI-KV/lsm/manifest.hpp) | SST 元数据与分层管理 |
+| BlockCache | [block_cache.hpp](SHUAI-KV/lsm/block_cache.hpp) | LRU 块缓存 |
+| BloomFilter | [bloom_filter.hpp](SHUAI-KV/utils/bloom_filter.hpp) | 快速存在性判断 |
+| Compression | [compression.hpp](SHUAI-KV/utils/compression.hpp) | Snappy/LZ4 压缩 |
 
 ### MemTable (内存表)
 
@@ -139,6 +161,9 @@ Shuai-KV/
 │   │  [size(8B)] [bloom_filter] [count] [(key + value),...]  │  │
 │   └─────────────────────────────────────────────────────────┘  │
 │                                                                 │
+│   可选压缩：                                                     │
+│   [compressed_size(8B)] [flags(1B)] [compressed_data...]       │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -163,6 +188,142 @@ Shuai-KV/
 │   查询 "world"：                                                │
 │   - 检查 bit[5], bit[12], bit[3]                                │
 │   - bit[5] 未设置 → world 一定不存在                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Block Cache (块缓存)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Block Cache 结构                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    │
+│   │ Block 1 │    │ Block 2 │    │ Block 3 │    │ Block N │    │
+│   │ (LRU)   │    │ (LRU)   │    │ (MRU)   │    │ (MRU)   │    │
+│   └────┬────┘    └────┬────┘    └────┬────┘    └────┬────┘    │
+│   │      │             │             │             │          │
+│   │      └─────────────┴──────┬──────┴─────────────┘          │
+│   │                          │                                 │
+│   │                    ┌──────▼──────┐                         │
+│   │                    │   HashMap   │                         │
+│   │                    │  (O(1) 查找) │                         │
+│   │                    └─────────────┘                         │
+│   │                                                                 │
+│   配置：                                                         │
+│   - 最大容量: 256MB (默认)                                       │
+│   - 淘汰策略: LRU                                                │
+│   - 支持命中率统计                                               │
+│   └─────────────────────────────────────────────────────────────┘
+```
+
+### SST 压缩
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SST 压缩流程                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   数据流：                                                       │
+│                                                                 │
+│   MemTable ──→ 序列化 ──→ 压缩 ──→ 写入 SST                    │
+│                     │                                            │
+│                     ▼                                            │
+│              ┌──────────────┐                                    │
+│              │  LZ4 / Snappy │                                    │
+│              │  压缩算法      │                                    │
+│              └──────────────┘                                    │
+│                     │                                            │
+│                     ▼                                            │
+│         典型压缩比: 2-4x                                          │
+│         压缩速度: LZ4 > Snappy                                    │
+│                                                                 │
+│   优势：                                                         │
+│   - 减少磁盘 I/O                                                 │
+│   - 降低存储空间                                                 │
+│   - 提高缓存效率                                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 异步 I/O (io_uring)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      io_uring 异步 I/O                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐  │
+│   │                    io_uring                             │  │
+│   │  ┌─────────────────┐         ┌─────────────────┐        │  │
+│   │  │   Submission   │  <--->  │     Completion  │        │  │
+│   │  │     Queue      │  ring   │      Queue      │        │  │
+│   │  │   (用户填写)     │         │   (内核填充)    │        │  │
+│   │  └─────────────────┘         └─────────────────┘        │  │
+│   │                                                         │  │
+│   │   用户通过内存映射直接操作队列，避免系统调用              │
+│   │   支持批量提交、SQPOLL 内核轮询                          │
+│   └─────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│   优势：                                                         │
+│   - 零拷贝读取（prep_read_fixed）                                │
+│   - 批量提交减少系统调用                                         │
+│   - 事件驱动减少用户态/内核态切换                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 批量提交 (Batch Commit)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      批量提交流程                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   1. BeginBatch() - 开始批量操作                                 │
+│   │        ↓                                                    │
+│   2. BatchPut(key, value) - 添加 Put 操作                        │
+│   │        ↓                                                    │
+│   3. BatchDelete(key) - 添加 Delete 操作                         │
+│   │        ↓                                                    │
+│   4. CommitBatch() - 原子性提交                                  │
+│   │        ↓                                                    │
+│   5. 应用到 MemTable 和 WAL                                      │
+│                                                                 │
+│   优势：                                                         │
+│   - 减少 I/O 次数                                                │
+│   - 原子性批量操作                                               │
+│   - 提高写入吞吐量                                               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 读 Quorum (线性化读)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Quorum 读取流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   1. 读取请求到达                                                │
+│   │        ↓                                                    │
+│   2. 获取当前读时间戳                                            │
+│   │        ↓                                                    │
+│   3. 从多个副本/版本读取                                         │
+│   │        ↓                                                    │
+│   4. 验证一致性（时间戳比较）                                    │
+│   │        ↓                                                    │
+│   5. 返回最新版本                                                │
+│                                                                 │
+│   组件：                                                         │
+│   - VersionManager: 跟踪键的多个版本                             │
+│   - ReadQuorum: 基于 Quorum 的读取验证                          │
+│   - SnapshotRead: 时间点一致的读取视图                           │
+│                                                                 │
+│   保证：                                                         │
+│   - 线性化读：读取最新提交的数据                                 │
+│   - 强一致性：所有副本数据一致                                   │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -217,6 +378,8 @@ Shuai-KV/
            │
            ▼
 4. 将 MemTable 序列化为 SST 文件
+    ├── 可选：压缩数据 (LZ4/Snappy)
+    └── 异步写入 (io_uring)
            │
            ▼
 5. 更新 Manifest，记录新 SST
@@ -247,6 +410,7 @@ Shuai-KV/
            ▼
 5. SST 内部查询
     │
+    ├── Block Cache 查找
     ├── BloomFilter 快速过滤
     └── 二分查找 DataBlock
            │
@@ -262,10 +426,10 @@ Shuai-KV/
 
 | 组件 | 文件 | 描述 |
 |------|------|------|
-| Pod | [pod.hpp](easykv/raft/pod.hpp) | Raft 节点核心实现 |
-| Config | [config.hpp](easykv/raft/config.hpp) | 集群配置管理 |
-| RaftLog | [raft_log.hpp](easykv/raft/raft_log.hpp) | 日志条目管理 |
-| Service | [service.hpp](easykv/raft/service.hpp) | gRPC 服务实现 |
+| Pod | [pod.hpp](SHUAI-KV/raft/pod.hpp) | Raft 节点核心实现 |
+| Config | [config.hpp](SHUAI-KV/raft/config.hpp) | 集群配置管理 |
+| RaftLog | [raft_log.hpp](SHUAI-KV/raft/raft_log.hpp) | 日志条目管理 |
+| Service | [service.hpp](SHUAI-KV/raft/service.hpp) | RPC 服务实现 |
 
 ### 节点状态机
 
@@ -380,44 +544,6 @@ service EasyKvService {
 
 ---
 
-## 核心数据结构
-
-### SkipList 节点
-
-```cpp
-struct Node {
-    std::vector<Node*> nexts;   // 多层指针
-    std::string key;            // 键
-    std::string value;          // 值
-    easykv::common::RWLock rw_lock;  // 读写锁
-}
-```
-
-### Raft Entry
-
-```protobuf
-message Entry {
-    int32 term;       // 任期号
-    int32 index;      // 日志索引
-    string key;       // 操作 key
-    string value;     // 操作 value
-    int32 mode;       // 0: put, 1: delete
-    int32 committed;  // 提交标志
-}
-```
-
-### EntryIndex (SST 索引)
-
-```cpp
-struct EntryIndex {
-    std::string_view key;      // 键（指向 mmap 内存）
-    std::string_view value;    // 值（指向 mmap 内存）
-    size_t offset;             // 在 DataBlock 中的偏移量
-}
-```
-
----
-
 ## 编译与运行
 
 ### 环境要求
@@ -481,7 +607,7 @@ cd Shuai-KV
 ./build.sh
 
 # 或者直接使用 Bazel
-bazel build //easykv:server //easykv:client
+bazel build //SHUAI-KV:server //SHUAI-KV:client
 ```
 
 ### 配置集群
@@ -509,23 +635,23 @@ bazel build //easykv:server //easykv:client
 
 ```bash
 # 启动服务器
-./bazel-bin/easykv/server
+./bazel-bin/SHUAI-KV/server
 
 # 在另一个终端启动客户端
-./bazel-bin/easykv/client
+./bazel-bin/SHUAI-KV/client
 ```
 
 #### 2. 多节点模式（分布式）
 
 ```bash
 # 节点1 (终端1)
-./bazel-bin/easykv/server --config=raft.cfg --id=1
+./bazel-bin/SHUAI-KV/server --config=raft.cfg --id=1
 
 # 节点2 (终端2)
-./bazel-bin/easykv/server --config=raft.cfg --id=2
+./bazel-bin/SHUAI-KV/server --config=raft.cfg --id=2
 
 # 节点3 (终端3)
-./bazel-bin/easykv/server --config=raft.cfg --id=3
+./bazel-bin/SHUAI-KV/server --config=raft.cfg --id=3
 ```
 
 ### 客户端使用
@@ -549,7 +675,7 @@ quit
 #### 示例交互
 
 ```
-$ ./bazel-bin/easykv/client
+$ ./bazel-bin/SHUAI-KV/client
 > put user:1001 "John Doe"
 OK
 > put user:1002 "Jane Smith"
@@ -581,7 +707,7 @@ COPY . .
 RUN chmod +x build.sh
 RUN ./build.sh
 
-CMD ["./bazel-bin/easykv/server"]
+CMD ["./bazel-bin/SHUAI-KV/server"]
 ```
 
 ```bash
@@ -590,13 +716,6 @@ docker build -t shuai-kv .
 
 # 运行
 docker run -d -p 9001:9001 --name kv-node1 shuai-kv
-```
-
-### 性能测试
-
-```bash
-# 使用 wrk 进行压力测试（需要安装 wrk）
-wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 ```
 
 ---
@@ -624,6 +743,11 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 │                  │                                               │
 │                  ▼                                               │
 │         Compaction 合并 (后台顺序读写)                           │
+│                                                                 │
+│   优化手段：                                                    │
+│   - 异步 I/O (io_uring)                                        │
+│   - 批量提交 (Batch Commit)                                     │
+│   - SST 压缩 (减少 I/O 量)                                      │
 │                                                                 │
 │   优势：                                                        │
 │   - 所有磁盘写入都是顺序的                                       │
@@ -668,6 +792,10 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 │   - 3节点：容忍 1 节点故障                                     │
 │   - 5节点：容忍 2 节点故障                                     │
 │                                                                 │
+│   读优化：                                                      │
+│   - 读 Quorum 保证线性化读                                      │
+│   - 版本验证确保数据一致性                                      │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -708,6 +836,10 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 │                   │       │       │       │       │             │
 │                   └── Compaction ─────────────────┘             │
 │                                                                 │
+│   优化手段：                                                    │
+│   - SST 压缩 (LZ4/Snappy): 存储空间减少 2-4x                    │
+│   - Block Cache: 热数据加速读取                                 │
+│                                                                 │
 │   优势：                                                        │
 │   - 成本效益：冷数据自动下沉到大容量存储                         │
 │   - 自动管理：无需手动分区或分片                                 │
@@ -746,17 +878,22 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 │   │   2. 历史 MemTable (内存)          ──→  O(log n)        │  │
 │   │         │                                                │  │
 │   │         ▼                                                │  │
-│   │   3. Level 0 SST (磁盘，热数据)   ──→  毫秒级           │  │
+│   │   3. Block Cache (LRU 缓存)        ──→  亚毫秒级         │  │
 │   │         │                                                │  │
 │   │         ▼                                                │  │
-│   │   4. Level N SST (磁盘，冷数据)   ──→  稍慢             │  │
+│   │   4. Level 0 SST (磁盘，热数据)   ──→  毫秒级           │  │
+│   │         │                                                │  │
+│   │         ▼                                                │  │
+│   │   5. Level N SST (磁盘，冷数据)   ──→  稍慢             │  │
 │   │                                                          │  │
 │   └─────────────────────────────────────────────────────────┘  │
 │                                                                 │
 │   优化手段：                                                    │
+│   - Block Cache: LRU 淘汰策略，加速热数据                       │
 │   - 布隆过滤器：快速排除不存在的 key                            │
 │   - mmap：利用 OS 页缓存                                        │
 │   - Compaction：清理无效数据                                    │
+│   - 读 Quorum：版本验证优化读取                                 │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -799,6 +936,11 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 │   Recovery Time Objective (RTO): ~10 秒                        │
 │   Recovery Point Objective (RPO): 0（无数据丢失）               │
 │                                                                 │
+│   数据保护：                                                    │
+│   - Raft 日志复制                                               │
+│   - 定期快照                                                    │
+│   - WAL 预写日志                                                │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -821,6 +963,9 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 | 序列化 | Protocol Buffers | 高效、跨语言 |
 | RPC 框架 | gRPC | 高性能、成熟稳定 |
 | 构建系统 | Bazel | 支持大规模构建，快速增量编译 |
+| 压缩算法 | LZ4/Snappy | 速度与压缩率平衡 |
+| 异步 I/O | io_uring | Linux 高性能异步 I/O |
+| 缓存策略 | LRU Block Cache | 实现简单，命中率可观 |
 
 ---
 
@@ -843,6 +988,8 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 | 读取延迟 | P99 < 10ms |
 | 复制延迟 | < 100ms |
 | 故障恢复 | < 10s |
+| 压缩比 | 2-4x (视数据而定) |
+| 缓存命中率 | > 80% (热数据) |
 
 ---
 
@@ -855,14 +1002,11 @@ wrk -t4 -c100 -d30s http://localhost:9001/kv?key=test
 3. **mmap 文件映射**: 避免内核态和用户态数据拷贝
 4. **Copy-on-Write Manifest**: 读操作无需加锁
 5. **读写锁分离**: 一写多读模式
-
-### 未来优化方向
-
-- [ ] 压缩（SST 压缩）
-- [ ] 缓存优化（Block Cache）
-- [ ] 异步 I/O（io_uring）
-- [ ] 批量提交（Batch Commit）
-- [ ] 读 quorum（线性化读优化）
+6. **SST 压缩**: 支持 Snappy/LZ4 压缩算法，减少存储空间和 I/O
+7. **Block Cache**: LRU 缓存层，加速热数据读取
+8. **异步 I/O**: 基于 io_uring 的异步写入，提高吞吐量
+9. **批量提交**: 事务性批量写入，减少开销
+10. **读 Quorum**: 版本验证和线性化读优化
 
 ---
 

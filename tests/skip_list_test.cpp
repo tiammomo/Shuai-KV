@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "easykv/lsm/skiplist.hpp"
-#include "easykv/pool/thread_pool.hpp"
+#include "SHUAI-KV/lsm/skiplist.hpp"
+#include "SHUAI-KV/pool/thread_pool.hpp"
 
 TEST(SkipList, Function) {
     easykv::lsm::ConcurrentSkipList skip_list;

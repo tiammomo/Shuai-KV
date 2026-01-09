@@ -1,5 +1,5 @@
 cc_library(
-    name = "easykv",
+    name = "shuai-kv",
     srcs = glob([
         "utils/*.cpp",
     ]),
@@ -14,27 +14,27 @@ cc_library(
         "*.hpp",
     ]),
     deps = [
-        "//easykv/raft/protos:cc_raft_grpc"
+        "//SHUAI-KV/raft/protos:cc_raft_grpc"
     ],
     visibility = ["//visibility:public"],
 )
 
 cc_binary(
-    name = "easykv_service",
+    name = "server",
     srcs = [
         "server.cpp",
     ],
     deps = [
-        ":easykv"
+        ":shuai-kv"
     ]
 )
 
 cc_binary(
-    name = "easykv_client",
+    name = "client",
     srcs = [
         "client.cpp",
     ],
     deps = [
-        ":easykv"
+        ":shuai-kv"
     ]
 )

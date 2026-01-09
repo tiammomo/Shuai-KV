@@ -1,7 +1,7 @@
 #pragma once
-#include "easykv/resource_manager.hpp"
+#include "SHUAI-KV/resource_manager.hpp"
 
-#include "easykv/raft/protos/raft.grpc.pb.h"
+#include "SHUAI-KV/raft/protos/raft.grpc.pb.h"
 #include <grpcpp/support/status.h>
 #include <string>
 

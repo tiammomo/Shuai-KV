@@ -3,8 +3,8 @@
 #include <iostream>
 #include <string>
 
-#include "easykv/db.hpp"
-#include "easykv/pool/thread_pool.hpp"
+#include "SHUAI-KV/db.hpp"
+#include "SHUAI-KV/pool/thread_pool.hpp"
 
 TEST(DB, Function) {
     easykv::DB db;

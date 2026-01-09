@@ -1,6 +1,6 @@
-#include "easykv/raft/service.hpp"
-#include "easykv/raft/config.hpp"
-#include "easykv/resource_manager.hpp"
+#include "SHUAI-KV/raft/service.hpp"
+#include "SHUAI-KV/raft/config.hpp"
+#include "SHUAI-KV/resource_manager.hpp"
 
 #include <atomic>
 #include <grpcpp/grpcpp.h>

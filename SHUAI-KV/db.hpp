@@ -8,21 +8,44 @@
 #include <thread>
 #include <vector>
 
-#include "easykv/lsm/manifest.hpp"
-#include "easykv/lsm/memtable.hpp"
-#include "easykv/lsm/sst.hpp"
-#include "easykv/pool/thread_pool.hpp"
-#include "easykv/utils/lock.hpp"
+#include "SHUAI-KV/lsm/manifest.hpp"
+#include "SHUAI-KV/lsm/memtable.hpp"
+#include "SHUAI-KV/lsm/sst.hpp"
+#include "SHUAI-KV/lsm/block_cache.hpp"
+#include "SHUAI-KV/pool/thread_pool.hpp"
+#include "SHUAI-KV/utils/lock.hpp"
 
 namespace easykv {
 
+/**
+ * @brief DB 配置
+ */
+struct DBConfig {
+    /// @brief 压缩配置
+    lsm::CompressionConfig compression;
+
+    /// @brief Block Cache 配置
+    lsm::BlockCache::Config block_cache;
+
+    /// @brief MemTable 最大大小: 3MB (小于页面大小以优化IO)
+    size_t memtable_max_size = 4096 * 1024 - 1024 * 1024;
+
+    /// @brief 是否启用 Block Cache
+    bool enable_block_cache = true;
+};
+
 class DB {
 public:
-    DB() {
+    DB(const DBConfig& config = DBConfig()) : config_(config) {
         memtable_ = std::make_shared<lsm::MemTable>();
         to_sst_thread_ = std::thread(&DB::ToSSTLoop, this);
         manifest_queue_.emplace_back(std::make_shared<lsm::Manifest>());
         sst_id_ = manifest_queue_.back()->max_sst_id();
+
+        // 初始化 Block Cache
+        if (config_.enable_block_cache) {
+            block_cache_ = std::make_unique<lsm::BlockCache>(config_.block_cache);
+        }
     }
 
     ~DB() {
@@ -67,13 +90,31 @@ public:
 
     void Put(std::string_view key, std::string_view value) {
         memtable_->Put(key, value);
-        if (memtable_->binary_size() > memtable_max_size()) {
+        if (memtable_->binary_size() > config_.memtable_max_size) {
             easykv::common::RWLock::WriteLock w_lock(memtable_lock_);
             inmemtables_.emplace_back(memtable_);
             memtable_ = std::make_shared<easykv::lsm::MemeTable>();
             // 唤醒刷盘线程
             to_sst_cv_.notify_one();
         }
+    }
+
+    /// @brief 获取压缩率统计
+    double GetCompressionRatio() const {
+        easykv::common::RWLock::ReadLock r_lock(manifest_lock_);
+        size_t total_size = 0, uncompressed_size = 0;
+        for (auto& manifest : manifest_queue_) {
+            for (size_t i = 0; i < manifest->levels().size(); ++i) {
+                for (auto& sst : manifest->levels()[i].ssts()) {
+                    total_size += sst->binary_size();
+                    if (uncompressed_size == 0) {
+                        // 估算未压缩大小
+                        uncompressed_size += sst->binary_size() * 2;  // 假设压缩比 2x
+                    }
+                }
+            }
+        }
+        return total_size > 0 ? static_cast<double>(total_size) / uncompressed_size : 1.0;
     }
 private:
     void ToSSTLoop() {
@@ -97,9 +138,14 @@ private:
         }
     }
 
-    // 将 memtable 刷盘为 SST 文件
+    // 将 memtable 刷盘为 SST 文件（支持压缩和缓存）
     void ToSST(std::shared_ptr<lsm::MemeTable> inmemtable) {
-        auto sst = std::make_shared<lsm::SST>(*inmemtable, ++sst_id_);
+        auto sst = std::make_shared<lsm::SST>(*inmemtable, ++sst_id_, config_.compression);
+
+        // 设置 Block Cache
+        if (block_cache_) {
+            sst->SetBlockCache(block_cache_.get());
+        }
 
         {
             easykv::common::RWLock::WriteLock w_lock(manifest_lock_);
@@ -111,14 +157,40 @@ private:
         }
     }
 
+    // ============ 缓存相关接口 ============
+
+    /// @brief 获取 Block Cache 统计信息
+    const lsm::BlockCache::Stats& GetCacheStats() const {
+        static lsm::BlockCache::Stats empty_stats;
+        return block_cache_ ? block_cache_->GetStats() : empty_stats;
+    }
+
+    /// @brief 获取缓存命中率
+    double GetCacheHitRate() const {
+        return block_cache_ ? block_cache_->GetStats().HitRate() : 0.0;
+    }
+
+    /// @brief 清空 Block Cache
+    void ClearCache() {
+        if (block_cache_) {
+            block_cache_->Clear();
+        }
+    }
+
+    /// @brief 获取当前缓存大小
+    size_t GetCacheSize() const {
+        return block_cache_ ? block_cache_->CurrentSize() : 0;
+    }
+
 private:
-    // MemTable 最大大小: 3MB (小于页面大小以优化IO)
-    static constexpr size_t memtable_max_size() { return 4096 * 1024 - 1024 * 1024; }
+    DBConfig config_;  ///< 数据库配置
     std::shared_ptr<lsm::MemTable> memtable_;
     std::vector<std::shared_ptr<lsm::MemTable> > inmemtables_;
     std::vector<std::shared_ptr<easykv::lsm::Manifest> > manifest_queue_;
     easykv::common::RWLock manifest_lock_;
     easykv::common::RWLock memtable_lock_;
+
+    std::unique_ptr<lsm::BlockCache> block_cache_;  ///< Block Cache
 
     std::thread to_sst_thread_;
     std::mutex to_sst_mutex_;

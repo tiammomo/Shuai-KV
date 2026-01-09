@@ -7,7 +7,7 @@ cc_test(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -21,7 +21,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -35,7 +35,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -49,7 +49,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -63,7 +63,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 cc_binary(
@@ -76,7 +76,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -90,7 +90,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
 
@@ -104,8 +104,7 @@ cc_binary(
     ],
     deps = [
         "@googletest//:gtest_main",
-        "//easykv:easykv",
+        "//SHUAI-KV:shuai-kv",
     ],
 )
-
 

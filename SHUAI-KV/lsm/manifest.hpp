@@ -39,9 +39,9 @@
 #include <string_view>
 #include <vector>
 
-#include "easykv/lsm/skiplist.hpp"
-#include "easykv/lsm/sst.hpp"
-#include "easykv/lsm/memtable.hpp"
+#include "SHUAI-KV/lsm/skiplist.hpp"
+#include "SHUAI-KV/lsm/sst.hpp"
+#include "SHUAI-KV/lsm/memtable.hpp"
 
 namespace easykv {
 namespace lsm {
@@ -318,6 +318,9 @@ public:
 
     /// @brief 获取最大 SST ID
     size_t max_sst_id() const { return max_sst_id_; }
+
+    /// @brief 获取层列表（用于遍历）
+    const std::vector<Level>& levels() const { return levels_; }
 
     /**
      * @brief Compaction 结构体 - 用于优先级队列

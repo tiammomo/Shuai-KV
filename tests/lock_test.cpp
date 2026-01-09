@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 
-#include "easykv/utils/lock.hpp"
+#include "SHUAI-KV/utils/lock.hpp"
 
 TEST(Lock, Function) {
     easykv::common::RWLock lock;

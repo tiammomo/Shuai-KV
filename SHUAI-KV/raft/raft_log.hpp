@@ -14,10 +14,10 @@
 #include <sys/mman.h>
 #include <thread>
 
-#include "easykv/db.hpp"
-#include "easykv/resource_manager.hpp"
-#include "easykv/utils/ring_buffer_queue.hpp"
-#include "easykv/raft/protos/raft.grpc.pb.h"
+#include "SHUAI-KV/db.hpp"
+#include "SHUAI-KV/resource_manager.hpp"
+#include "SHUAI-KV/utils/ring_buffer_queue.hpp"
+#include "SHUAI-KV/raft/protos/raft.grpc.pb.h"
 namespace easykv {
 namespace raft {
 class SnapShot {

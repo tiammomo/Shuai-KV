@@ -2,7 +2,7 @@
 #include <memory>
 #include <string_view>
 #include <vector>
-#include "easykv/resource_manager.hpp"
+#include "SHUAI-KV/resource_manager.hpp"
 namespace easykv {
 
 class DBClient {

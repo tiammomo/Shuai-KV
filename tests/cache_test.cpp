@@ -1,8 +1,8 @@
 #include <iostream>
 #include <string>
 
-#include "easykv/cache/concurrent_cache.hpp"
-#include "easykv/utils/global_random.h"
+#include "SHUAI-KV/cache/concurrent_cache.hpp"
+#include "SHUAI-KV/utils/global_random.h"
 
 #include <gtest/gtest.h>
 #include <string_view>

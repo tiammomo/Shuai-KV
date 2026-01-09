@@ -40,7 +40,7 @@
 #include <string_view>
 #include <vector>
 
-#include "easykv/utils/global_random.h"
+#include "SHUAI-KV/utils/global_random.h"
 
 namespace easykv {
 namespace common {

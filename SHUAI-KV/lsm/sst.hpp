@@ -1,7 +1,9 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -13,11 +15,27 @@
 #include <fcntl.h>
 #include <linux/mman.h>
 
-#include "easykv/utils/bloom_filter.hpp"
-#include "easykv/lsm/memtable.hpp"
+#include "SHUAI-KV/utils/bloom_filter.hpp"
+#include "SHUAI-KV/utils/compression.hpp"
+#include "SHUAI-KV/lsm/memtable.hpp"
+#include "SHUAI-KV/lsm/block_cache.hpp"
 
 namespace easykv {
 namespace lsm {
+
+/**
+ * @brief 压缩配置
+ */
+struct CompressionConfig {
+    CompressionType type = CompressionType::kLZ4;  ///< 压缩算法类型
+    bool enable = true;                             ///< 是否启用压缩
+    size_t min_size_for_compression = 64;          ///< 最小压缩大小（小于此值不压缩）
+
+    /// @brief 判断是否应该压缩
+    bool ShouldCompress(size_t original_size) const {
+        return enable && original_size >= min_size_for_compression;
+    }
+};
 
 /**
  * EntryIndex - DataBlock 中的条目索引
@@ -137,6 +155,310 @@ private:
     size_t cached_binary_size_{0};
     bool binary_size_cached_{false};
     size_t size_{0};
+};
+
+/**
+ * @brief CompressedDataBlock - 支持压缩的 DataBlock
+ *
+ * 扩展 DataBlockIndex 功能，支持：
+ * - 透明压缩/解压
+ * - 懒加载（首次访问时才解压）
+ * - 压缩率统计
+ */
+class CompressedDataBlock : public DataBlockIndex {
+public:
+    CompressedDataBlock() : compressed_(false), decompressed_(false) {}
+
+    /**
+     * @brief 从压缩数据加载
+     * @param compressed_data 压缩数据指针
+     * @param compressed_size 压缩数据大小
+     * @param config 压缩配置
+     * @return 加载的字节数
+     */
+    size_t LoadCompressed(const char* compressed_data, size_t compressed_size,
+                          const CompressionConfig& config) {
+        CompressionConfig_ = config;
+
+        // 读取压缩头信息
+        size_t index = 0;
+        compressed_size_ = *reinterpret_cast<const size_t*>(compressed_data);
+        index += sizeof(size_t);
+
+        uint8_t compression_flags = static_cast<uint8_t>(compressed_data[index]);
+        index += sizeof(uint8_t);
+
+        compressed_ = (compression_flags & 0x01);
+        has_compression_header_ = (compression_flags & 0x02);
+
+        // 加载布隆过滤器（始终不压缩）
+        index += bloom_filter_.Load(const_cast<char*>(compressed_data + index));
+
+        // 加载压缩的条目数据
+        compressed_entries_data_.assign(compressed_data + index,
+                                         compressed_data + compressed_size);
+        decompressed_ = !compressed_;
+
+        return compressed_size;
+    }
+
+    /**
+     * @brief 解压数据块（懒加载）
+     * @return 解压后的数据指针
+     */
+    const char* EnsureDecompressed() {
+        if (!compressed_ || decompressed_) {
+            return compressed_entries_data_.data();
+        }
+
+        auto compressor = common::CompressionFactory::Create(CompressionConfig_.type);
+        if (!compressor) {
+            return compressed_entries_data_.data();
+        }
+
+        common::CompressedData compressed(compressed_entries_data_.data(),
+                                           compressed_entries_data_.size(),
+                                           compressed_size_);
+
+        decompressed_data_.resize(compressed_size_);
+        size_t result = compressor->Decompress(compressed,
+                                                decompressed_data_.data(),
+                                                decompressed_size_);
+
+        if (result > 0) {
+            decompressed_ = true;
+            // 释放压缩数据，节省内存
+            std::vector<char>().swap(compressed_entries_data_);
+            return decompressed_data_.data();
+        }
+
+        return compressed_entries_data_.data();
+    }
+
+    /**
+     * @brief 获取压缩率
+     * @return 压缩率（0-1，1表示无压缩）
+     */
+    double GetCompressionRatio() const {
+        if (!compressed_ || decompressed_data_.empty()) {
+            return 1.0;
+        }
+        return static_cast<double>(compressed_entries_data_.size()) /
+               decompressed_data_.size();
+    }
+
+    /// @brief 是否已压缩
+    bool IsCompressed() const { return compressed_; }
+
+    /// @brief 是否已解压
+    bool IsDecompressed() const { return decompressed_; }
+
+    /// @brief 获取压缩后大小
+    size_t compressed_size() const { return compressed_size_; }
+
+private:
+    CompressionConfig CompressionConfig_;           ///< 压缩配置
+    size_t compressed_size_{0};                     ///< 压缩后大小
+    bool compressed_{false};                        ///< 是否已压缩
+    bool has_compression_header_{true};             ///< 是否有压缩头
+    bool decompressed_{false};                      ///< 是否已解压
+    std::vector<char> compressed_entries_data_;     ///< 压缩的条目数据
+    std::vector<char> decompressed_data_;           ///< 解压后的数据
+};
+
+/**
+ * @brief 压缩数据块构建器
+ *
+ * 用于构建压缩的 DataBlock，提供：
+ * - 键值对累加
+ * - 布隆过滤器构建
+ * - 数据压缩
+ */
+class CompressedBlockBuilder {
+public:
+    CompressedBlockBuilder(const CompressionConfig& config = CompressionConfig())
+        : config_(config), total_size_(0), count_(0) {}
+
+    /// @brief 添加键值对
+    void Add(std::string_view key, std::string_view value) {
+        // 序列化键值对
+        size_t entry_size = 2 * sizeof(size_t) + key.size() + value.size();
+        raw_data_.reserve(entry_size);
+
+        char size_buf[2 * sizeof(size_t)];
+        *reinterpret_cast<size_t*>(size_buf) = key.size();
+        *reinterpret_cast<size_t*>(size_buf + sizeof(size_t)) = value.size();
+        raw_data_.insert(raw_data_.end(), size_buf, size_buf + 2 * sizeof(size_t));
+        raw_data_.insert(raw_data_.end(), key.data(), key.data() + key.size());
+        raw_data_.insert(raw_data_.end(), value.data(), value.data() + value.size());
+
+        // 更新布隆过滤器
+        bloom_filter_.Insert(key, key.size());
+
+        total_size_ += entry_size;
+        ++count_;
+    }
+
+    /// @brief 获取键值对数量
+    size_t count() const { return count_; }
+
+    /// @brief 获取原始数据大小
+    size_t raw_size() const { return total_size_; }
+
+    /// @brief 构建并压缩
+    /// @return 压缩后的数据
+    std::vector<char> Build() {
+        std::vector<char> result;
+
+        // 计算头大小：[size(8B) | flags(1B) | bloom_filter | count(8B) | entries]
+        size_t bloom_size = bloom_filter_.binary_size();
+        size_t header_size = sizeof(size_t) + sizeof(uint8_t) + bloom_size + sizeof(size_t);
+        size_t original_size = header_size + raw_data_.size();
+
+        // 准备压缩数据
+        std::vector<char> to_compress;
+        to_compress.reserve(bloom_size + sizeof(size_t) + raw_data_.size());
+
+        // 写入 count
+        char count_buf[sizeof(size_t)];
+        *reinterpret_cast<size_t*>(count_buf) = count_;
+        to_compress.insert(to_compress.end(), count_buf, count_buf + sizeof(size_t));
+
+        // 写入布隆过滤器
+        bloom_size = bloom_filter_.binary_size();
+        std::vector<char> bloom_data(bloom_size);
+        bloom_filter_.Save(bloom_data.data());
+        to_compress.insert(to_compress.end(), bloom_data.begin(), bloom_data.end());
+
+        // 写入原始数据
+        to_compress.insert(to_compress.end(), raw_data_.begin(), raw_data_.end());
+
+        // 决定是否压缩
+        bool do_compress = config_.ShouldCompress(original_size);
+
+        // 构建结果
+        // [original_size(8B) | flags(1B) | compressed_flag | bloom_filter | count | data]
+        result.resize(sizeof(size_t) + sizeof(uint8_t) + header_size);
+
+        // 写入原始大小
+        *reinterpret_cast<size_t*>(result.data()) = original_size;
+
+        // 写入压缩标志
+        uint8_t flags = do_compress ? 0x01 : 0x00;
+        result[sizeof(size_t)] = static_cast<char>(flags);
+
+        // 写入布隆过滤器
+        size_t data_offset = sizeof(size_t) + sizeof(uint8_t);
+        bloom_filter_.Save(result.data() + data_offset);
+
+        // 写入 count
+        *reinterpret_cast<size_t*>(result.data() + data_offset + bloom_size) = count_;
+
+        // 写入数据
+        data_offset += bloom_size + sizeof(size_t);
+        memcpy(result.data() + data_offset, raw_data_.data(), raw_data_.size());
+
+        // 如果需要压缩
+        if (do_compress) {
+            auto compressor = common::CompressionFactory::Create(config_.type);
+            if (compressor) {
+                common::CompressedData compressed = compressor->Compress(
+                    result.data() + sizeof(size_t) + sizeof(uint8_t),
+                    header_size + raw_data_.size());
+
+                if (!compressed.empty()) {
+                    std::vector<char> compressed_result;
+                    compressed_result.resize(sizeof(size_t) + sizeof(uint8_t) + compressed.size());
+
+                    // 写入压缩后大小
+                    *reinterpret_cast<size_t*>(compressed_result.data()) = compressed.size();
+
+                    // 写入压缩标志（保持压缩）
+                    compressed_result[sizeof(size_t)] = 0x01;
+
+                    // 写入压缩数据
+                    memcpy(compressed_result.data() + sizeof(size_t) + sizeof(uint8_t),
+                           compressed.data(), compressed.size());
+
+                    result = std::move(compressed_result);
+                }
+            }
+        }
+
+        return result;
+    }
+
+private:
+    CompressionConfig config_;
+    std::vector<char> raw_data_;
+    common::BloomFilter bloom_filter_;
+    size_t total_size_;
+    size_t count_;
+};
+
+/**
+ * @brief CachedDataBlock - 支持缓存的 DataBlock
+ *
+ * 扩展 DataBlockIndex 功能，支持：
+ * - BlockCache 集成
+ * - 懒加载（首次访问时从缓存加载）
+ * - 缓存命中率统计
+ */
+class CachedDataBlock : public DataBlockIndex {
+public:
+    CachedDataBlock() : cache_(nullptr), sst_id_(0), block_offset_(0), cached_(false) {}
+
+    /**
+     * @brief 初始化缓存引用
+     * @param cache 缓存指针
+     * @param sst_id SST ID
+     * @param block_offset 块偏移量
+     */
+    void InitCache(BlockCache* cache, size_t sst_id, size_t block_offset) {
+        cache_ = cache;
+        sst_id_ = sst_id;
+        block_offset_ = block_offset;
+    }
+
+    /**
+     * @brief 尝试从缓存加载
+     * @return 缓存的数据指针，未命中返回 nullptr
+     */
+    const std::vector<char>* LoadFromCache() {
+        if (!cache_) return nullptr;
+
+        auto data = cache_->Get(sst_id_, block_offset_);
+        if (data) {
+            cached_ = true;
+            return data;
+        }
+        return nullptr;
+    }
+
+    /**
+     * @brief 将数据放入缓存
+     * @param data 要缓存的数据
+     * @return true 缓存成功
+     */
+    bool PutToCache(std::vector<char>&& data) {
+        if (!cache_ || cached_) return false;
+        return cache_->Put(sst_id_, block_offset_, std::move(data));
+    }
+
+    /// @brief 是否已缓存
+    bool IsCached() const { return cached_; }
+
+    /// @brief 获取 SST ID
+    size_t sst_id() const { return sst_id_; }
+
+    /// @brief 获取块偏移量
+    size_t block_offset() const { return block_offset_; }
+
+private:
+    BlockCache* cache_;    ///< 缓存指针（不拥有所有权）
+    size_t sst_id_;        ///< SST ID
+    size_t block_offset_;  ///< 块偏移量
+    bool cached_;          ///< 是否已缓存
 };
 
 class DataBlockIndexIndex {
@@ -439,6 +761,126 @@ public:
         ready_ = true;
     }
 
+    /**
+     * @brief 使用压缩创建 SST（从 EntryView 向量）
+     * @param entries 键值对列表
+     * @param id SST 文件 ID
+     * @param config 压缩配置
+     */
+    SST(std::vector<EntryView> entries, int id, const CompressionConfig& config)
+        : compression_config_(config) {
+        CompressedBlockBuilder builder(config);
+
+        // 构建压缩数据块
+        for (auto& entry : entries) {
+            builder.Add(entry.key, entry.value);
+        }
+        std::vector<char> compressed_data = builder.Build();
+
+        // 计算文件大小
+        // IndexBlock: [size(8B) | count(8B) | (offset(8B) + key_size(8B) + key)]
+        size_t index_block_size = 2 * sizeof(size_t) * (entries.size() + 1);
+        index_block_size += entries.begin()->key.size();
+
+        // DataBlock: [compressed_size(8B) | compressed_data]
+        file_size_ = index_block_size + compressed_data.size();
+        uncompressed_size_ = index_block_size + builder.raw_size();
+
+        id_ = id;
+        name_ = std::to_string(id_) + ".sst";
+
+        fd_ = open(name_.c_str(), O_RDWR);
+        if (fd_ == -1) {
+            fd_ = open(name_.c_str(), O_RDWR | O_CREAT, 0700);
+        }
+
+        lseek(fd_, file_size_ - 1, SEEK_SET);
+        write(fd_, "1", 1);
+
+        data_ = (char*)mmap(NULL, file_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+        char* index_block_ptr = data_;
+        char* data_block_ptr = data_ + index_block_size;
+
+        // 写入 IndexBlock
+        size_t index_block_index = 0;
+        *reinterpret_cast<size_t*>(index_block_ptr) = index_block_size;
+        index_block_index += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = 1;  // count
+        index_block_ptr += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = index_block_size;  // offset
+        index_block_index += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = entries.begin()->key.size();  // key size
+        index_block_index += sizeof(size_t);
+        memcpy(index_block_ptr + index_block_index, entries.begin()->key.data(), entries.begin()->key.size());
+
+        // 写入压缩的 DataBlock
+        *reinterpret_cast<size_t*>(data_block_ptr) = compressed_data.size();
+        memcpy(data_block_ptr + sizeof(size_t), compressed_data.data(), compressed_data.size());
+
+        index_block.Load(data_);
+        loaded_ = true;
+        ready_ = true;
+    }
+
+    /**
+     * @brief 使用压缩创建 SST（从 MemTable）
+     * @param memtable 内存表
+     * @param id SST 文件 ID
+     * @param config 压缩配置
+     */
+    SST(MemeTable& memtable, size_t id, const CompressionConfig& config)
+        : compression_config_(config) {
+        CompressedBlockBuilder builder(config);
+
+        // 构建压缩数据块
+        for (auto it = memtable.begin(); it != memtable.end(); ++it) {
+            builder.Add(std::string_view((*it).key), std::string_view((*it).value));
+        }
+        std::vector<char> compressed_data = builder.Build();
+
+        // 计算文件大小
+        size_t index_block_size = 2 * sizeof(size_t) * (memtable.size() + 1);
+        index_block_size += (*memtable.begin()).key.size();
+
+        file_size_ = index_block_size + compressed_data.size();
+        uncompressed_size_ = index_block_size + builder.raw_size();
+
+        id_ = id;
+        name_ = std::to_string(id_) + ".sst";
+
+        fd_ = open(name_.c_str(), O_RDWR);
+        if (fd_ == -1) {
+            fd_ = open(name_.c_str(), O_RDWR | O_CREAT, 0700);
+        }
+
+        lseek(fd_, file_size_ - 1, SEEK_SET);
+        write(fd_, "1", 1);
+
+        data_ = (char*)mmap(NULL, file_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+        char* index_block_ptr = data_;
+        char* data_block_ptr = data_ + index_block_size;
+
+        // 写入 IndexBlock
+        size_t index_block_index = 0;
+        *reinterpret_cast<size_t*>(index_block_ptr) = index_block_size;
+        index_block_index += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = 1;  // count
+        index_block_ptr += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = index_block_size;  // offset
+        index_block_index += sizeof(size_t);
+        *reinterpret_cast<size_t*>(index_block_ptr + index_block_index) = (*memtable.begin()).key.size();  // key size
+        index_block_index += sizeof(size_t);
+        memcpy(index_block_ptr + index_block_index, (*memtable.begin()).key.c_str(), (*memtable.begin()).key.size());
+
+        // 写入压缩的 DataBlock
+        *reinterpret_cast<size_t*>(data_block_ptr) = compressed_data.size();
+        memcpy(data_block_ptr + sizeof(size_t), compressed_data.data(), compressed_data.size());
+
+        index_block.Load(data_);
+        loaded_ = true;
+        ready_ = true;
+    }
+
     Iterator begin() {
         return Iterator(this);
     }
@@ -524,6 +966,71 @@ public:
     std::vector<DataBlockIndexIndex>& data_block_index() {
         return index_block.data_block_index();
     }
+
+    // ============ 压缩相关接口 ============
+
+    /// @brief 设置压缩配置
+    void SetCompressionConfig(const CompressionConfig& config) {
+        compression_config_ = config;
+    }
+
+    /// @brief 获取压缩配置
+    const CompressionConfig& GetCompressionConfig() const {
+        return compression_config_;
+    }
+
+    /// @brief 检查是否使用压缩
+    bool IsCompressed() const {
+        return compression_config_.enable;
+    }
+
+    /// @brief 获取压缩率统计
+    double GetCompressionRatio() const {
+        if (file_size_ == 0 || uncompressed_size_ == 0) {
+            return 1.0;
+        }
+        return static_cast<double>(file_size_) / uncompressed_size_;
+    }
+
+    // ============ 缓存相关接口 ============
+
+    /// @brief 设置 Block Cache
+    void SetBlockCache(BlockCache* cache) {
+        block_cache_ = cache;
+    }
+
+    /// @brief 获取 Block Cache
+    BlockCache* GetBlockCache() const {
+        return block_cache_;
+    }
+
+    /// @brief 预加载 DataBlock 到缓存
+    void PrefetchDataBlock(size_t block_index) {
+        if (!block_cache_ || block_index >= data_block_index().size()) {
+            return;
+        }
+
+        // 检查是否已缓存
+        auto& block = data_block_index()[block_index].Get();
+        if (block.IsCached()) {
+            return;
+        }
+
+        // 从 mmap 内存复制数据到缓存
+        size_t offset = *reinterpret_cast<size_t*>(data_ + data_block_index()[block_index].Get().offset());
+        size_t block_size = *reinterpret_cast<size_t*>(data_ + offset);
+
+        std::vector<char> block_data(data_ + offset, data_ + offset + block_size);
+        block.InitCache(block_cache_, id_, offset);
+        block.PutToCache(std::move(block_data));
+    }
+
+    /// @brief 获取缓存命中率
+    double GetCacheHitRate() const {
+        if (!block_cache_) return 0.0;
+        return block_cache_->GetStats().HitRate();
+    }
+
 private:
     bool ready_ = false;
     int64_t id_ = 0;
@@ -533,6 +1040,9 @@ private:
     IndexBlockIndex index_block;
     bool loaded_ = false;
     size_t file_size_ = 0;
+    CompressionConfig compression_config_;  ///< 压缩配置
+    size_t uncompressed_size_{0};           ///< 未压缩时的大小
+    BlockCache* block_cache_{nullptr};      ///< Block Cache（不拥有所有权）
 };
 
 
