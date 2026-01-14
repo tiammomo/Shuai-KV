@@ -48,6 +48,12 @@
 | [12-utils.md](12-utils.md) | 工具类 | RWLock、线程池等 |
 | [13-module-relationship.md](13-module-relationship.md) | 模块关系 | 组件交互图 |
 
+### 七、大模型应用
+
+| 文件 | 主题 | 说明 |
+|------|------|------|
+| [14-llm-applications.md](14-llm-applications.md) | LLM 应用场景 | Prompt 缓存、对话历史、RAG 等 |
+
 ## 推荐阅读顺序
 
 ### 路径 A：存储引擎入门
@@ -74,6 +80,12 @@
 
 ```
 入门 → 架构 → 存储引擎 → 分布式 → 核心层 → 深入理解
+```
+
+### 路径 D：大模型应用
+
+```
+00-overview.md → 01-architecture.md → 14-llm-applications.md
 ```
 
 ## 核心数据结构
