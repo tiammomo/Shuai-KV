@@ -1,0 +1,77 @@
+# Bazel build outputs
+bazel-*
+bazel-bin/
+bazel-out/
+bazel-testlogs/
+bazel-genfiles/
+*.bazelproject
+*.bazel
+
+# Build artifacts
+build/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+*.sst
+manifest
+*.log
+core
+core.*
+
+# Backup files
+*~
+*.bak
+*.orig
+*.rej
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Protobuf
+*.pb.cc
+*.pb.h
+*_pb2.py
+*_pb2_grpc.py
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*.loc
+
+# Credential files (security)
+*.pem
+*.key
+*.crt
+
+# Bazel lock file
+MODULE.bazel.lock
+.cache
+external
+compile_commands.json

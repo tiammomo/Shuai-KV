@@ -1,0 +1,14 @@
+# shuaikv Clang Format Configuration
+# Google 风格（最小配置，兼容旧版本）
+
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Right
+NamespaceIndentation: All
+BreakBeforeBraces: Allman
+ConstructorInitializerIndentWidth: 4
+Cpp11BracedListStyle: true

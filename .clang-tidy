@@ -1,0 +1,44 @@
+# Clang-Tidy 配置
+# 使用方式: clang-tidy source.cpp --config=.clang-tidy
+
+Checks: '
+  *,
+  -abseil-*,
+  -altera-*,
+  -android-*,
+  -boost-*,
+  -bugprone-reserved-identifier,
+  -cert-*,
+  -cppcoreguidelines-*,
+  -darwin-*,
+  -fuchsia-*,
+  -google-*,
+  -hicpp-*,
+  -linuxkernel-*,
+  -llvm-*,
+  -llvmlibc-*,
+  -mpi-*,
+  -objc-*,
+  -openmp-*,
+  -performance-*
+  -portability-simd*
+  -readability-*
+  -zircon-*
+'
+
+# 禁用特定警告
+DisableChecks: '
+  -misc-unused-parameters
+  -misc-no-recursion
+  -cppcoreguidelines-pro-type-member-init
+  -google-runtime-references
+'
+
+FormatStyle: 'file'
+HeaderFilterRegex: 'shuaikv/.*'
+CheckOptions:
+  # 开启严格模式
+  - key: StrictMode
+    value: true
+  - key: AnalyzeTemporaryDtors
+    value: true
