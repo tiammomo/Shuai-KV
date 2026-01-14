@@ -71,13 +71,13 @@ jobs:
         echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
         sudo apt-get update
         sudo apt-get install -y clang-format-20
-        sudo ln -sf /usr/bin/clang-format-20 /usr/bin/clang-format
+        # 直接使用完整路径，不创建 symlink
+        /usr/bin/clang-format-20 --version
 
     - name: Check C++ formatting
       run: |
-        CLANG_FORMAT=$(which clang-format)
-        echo "Using clang-format: $CLANG_FORMAT"
-        find shuaikv tests -name "*.hpp" -o -name "*.cpp" | xargs $CLANG_FORMAT --dry-run --style=file 2>&1
+        # 直接使用 clang-format-20 的完整路径
+        find shuaikv tests -name "*.hpp" -o -name "*.cpp" | xargs /usr/bin/clang-format-20 --dry-run --style=file 2>&1
         if [ ${PIPESTATUS[0]} -ne 0 ]; then
           echo "::warning::Code formatting issues found."
         fi
